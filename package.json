@@ -1,0 +1,16 @@
+{
+  "name": "art-explorer",
+  "version": "1.0.0",
+  "description": "CSCI 571 Assignment 3 - Art Collection Explorer",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
