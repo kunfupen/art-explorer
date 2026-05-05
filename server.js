@@ -1,6 +1,10 @@
 const express = require("express");
+const fs = require("fs");
+const path = require("path");
 
 const app = express();
+loadLocalEnv();
+
 const PORT = process.env.PORT || 8080;
 const HARVARD_API_KEY = process.env.HARVARD_API_KEY || "";
 
@@ -8,9 +12,40 @@ app.use(express.static("public"));
 app.use(express.json());
 
 const MUSEUM_COORDS = {
-  met: { lat: 40.7794, lng: -73.9632, name: "The Metropolitan Museum of Art" },
-  harvard: { lat: 42.3744, lng: -71.1143, name: "Harvard Art Museums" }
+  met: {
+    lat: 40.7794,
+    lng: -73.9632,
+    name: "The Metropolitan Museum of Art",
+    address: "1000 Fifth Avenue, New York, NY 10028"
+  },
+  harvard: {
+    lat: 42.3744,
+    lng: -71.1143,
+    name: "Harvard Art Museums",
+    address: "32 Quincy Street, Cambridge, MA 02138"
+  }
 };
+const responseCache = new Map();
+
+function loadLocalEnv() {
+  const envPath = path.join(__dirname, ".env");
+  if (!fs.existsSync(envPath)) return;
+
+  const lines = fs.readFileSync(envPath, "utf8").split(/\r?\n/);
+  lines.forEach(function (line) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) return;
+
+    const separator = trimmed.indexOf("=");
+    if (separator === -1) return;
+
+    const key = trimmed.slice(0, separator).trim();
+    const value = trimmed.slice(separator + 1).trim();
+    if (key && process.env[key] === undefined) {
+      process.env[key] = value;
+    }
+  });
+}
 
 function safeString(value) {
   if (value === null || value === undefined) return "";
@@ -29,6 +64,7 @@ function normalizeMet(record) {
     department: safeString(record.department),
     image: safeString(record.primaryImageSmall) || safeString(record.primaryImage),
     museum: MUSEUM_COORDS.met.name,
+    museumAddress: MUSEUM_COORDS.met.address,
     museumUrl: safeString(record.objectURL),
     lat: MUSEUM_COORDS.met.lat,
     lng: MUSEUM_COORDS.met.lng
@@ -55,48 +91,168 @@ function normalizeHarvard(record) {
     department: safeString(record.department),
     image: image,
     museum: MUSEUM_COORDS.harvard.name,
+    museumAddress: MUSEUM_COORDS.harvard.address,
     museumUrl: safeString(record.url),
     lat: MUSEUM_COORDS.harvard.lat,
     lng: MUSEUM_COORDS.harvard.lng
   };
 }
 
-async function fetchJson(url) {
-  const response = await fetch(url);
-  if (!response.ok) {
-    throw new Error("Request failed with status " + response.status);
+function hasArtworkImage(item) {
+  return Boolean(item && item.image && String(item.image).trim());
+}
+
+function matchesImagePreference(item, hasImage) {
+  return hasArtworkImage(item) === hasImage;
+}
+
+function artistSearchTerms(name) {
+  const cleaned = safeString(name)
+    .replace(/\([^)]*\)/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  const parts = cleaned.split(" ").filter(Boolean);
+  const lastName = parts.length ? parts[parts.length - 1] : cleaned;
+
+  return {
+    fullName: cleaned.toLowerCase(),
+    lastName: lastName.toLowerCase()
+  };
+}
+
+function artistMatches(item, terms) {
+  const artist = safeString(item.artist).toLowerCase();
+  if (!artist || artist === "unknown artist") return false;
+  return Boolean(
+    (terms.fullName && artist.includes(terms.fullName)) ||
+      (terms.lastName && artist.includes(terms.lastName))
+  );
+}
+
+function searchRelevanceScore(item, query) {
+  const q = safeString(query).toLowerCase();
+  const title = safeString(item.title).toLowerCase();
+  const artist = safeString(item.artist).toLowerCase();
+  const queryTerms = q.split(/\s+/).filter(Boolean);
+  const lastQueryTerm = queryTerms.length ? queryTerms[queryTerms.length - 1] : q;
+
+  if (artist === q) return 0;
+  if (artist.endsWith(" " + q) || artist === lastQueryTerm || artist.endsWith(" " + lastQueryTerm)) return 1;
+  if (artist.startsWith(q)) return 2;
+  if (artist.includes(q)) return 3;
+  if (lastQueryTerm && artist.includes(lastQueryTerm)) return 4;
+  if (title === q) return 5;
+  if (title.startsWith(q)) return 6;
+  if (title.includes(q)) return 7;
+  return 8;
+}
+
+function sleep(ms) {
+  return new Promise(function (resolve) {
+    setTimeout(resolve, ms);
+  });
+}
+
+function shouldRetryStatus(status) {
+  return status === 403 || status === 429 || status >= 500;
+}
+
+async function fetchJson(url, options) {
+  const retryCount = options && Number.isInteger(options.retries) ? options.retries : 2;
+  const retryDelay = options && Number.isInteger(options.retryDelay) ? options.retryDelay : 350;
+  const cacheMs = options && Number.isInteger(options.cacheMs) ? options.cacheMs : 0;
+  const cached = responseCache.get(url);
+
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.data;
   }
-  return response.json();
+
+  let lastStatus = 0;
+
+  for (let attempt = 0; attempt <= retryCount; attempt += 1) {
+    const response = await fetch(url, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (compatible; ArtExplorer/1.0)",
+        "Accept": "application/json"
+      }
+    });
+
+    if (response.ok) {
+      const data = await response.json();
+      if (cacheMs > 0) {
+        responseCache.set(url, {
+          expiresAt: Date.now() + cacheMs,
+          data: data
+        });
+      }
+      return data;
+    }
+
+    lastStatus = response.status;
+    if (!shouldRetryStatus(response.status) || attempt === retryCount) break;
+    await sleep(retryDelay * (attempt + 1));
+  }
+
+  throw new Error("Request failed with status " + lastStatus);
+}
+
+async function fetchJsonList(urls) {
+  const results = [];
+  const batchSize = 5;
+
+  for (let i = 0; i < urls.length; i += batchSize) {
+    const batch = urls.slice(i, i + batchSize);
+    const batchResults = await Promise.all(
+      batch.map(async function (url) {
+        try {
+          return await fetchJson(url, { retries: 2, retryDelay: 500, cacheMs: 60 * 60 * 1000 });
+        } catch (err) {
+          return null;
+        }
+      })
+    );
+    results.push.apply(results, batchResults);
+  }
+
+  return results;
+}
+
+async function fetchMetSearch(query, hasImage) {
+  const baseUrl =
+    "https://collectionapi.metmuseum.org/public/collection/v1/search?q=" +
+    encodeURIComponent(query);
+
+  if (!hasImage) {
+    return fetchJson(baseUrl, { retries: 4, retryDelay: 1000, cacheMs: 5 * 60 * 1000 });
+  }
+
+  try {
+    return await fetchJson(baseUrl + "&hasImages=true", { retries: 4, retryDelay: 1000, cacheMs: 5 * 60 * 1000 });
+  } catch (err) {
+    return fetchJson(baseUrl, { retries: 4, retryDelay: 1000, cacheMs: 5 * 60 * 1000 });
+  }
 }
 
 async function fetchMetCandidates(query, hasImage, maxCount) {
-  const searchUrl =
-    "https://collectionapi.metmuseum.org/public/collection/v1/search?q=" +
-    encodeURIComponent(query) +
-    "&hasImages=" +
-    (hasImage ? "true" : "false");
-
-  const searchData = await fetchJson(searchUrl);
+  const searchData = await fetchMetSearch(query, hasImage);
   const ids = Array.isArray(searchData.objectIDs) ? searchData.objectIDs.slice(0, maxCount) : [];
   if (ids.length === 0) return [];
 
-  const details = await Promise.all(
-    ids.map(async function (id) {
-      try {
-        const obj = await fetchJson(
-          "https://collectionapi.metmuseum.org/public/collection/v1/objects/" + encodeURIComponent(String(id))
-        );
-        return normalizeMet(obj);
-      } catch (err) {
-        return null;
-      }
-    })
-  );
-
-  return details.filter(Boolean).filter(function (item) {
-    if (!hasImage) return true;
-    return Boolean(item.image);
+  const detailUrls = ids.map(function (id) {
+    return "https://collectionapi.metmuseum.org/public/collection/v1/objects/" + encodeURIComponent(String(id));
   });
+  const details = await fetchJsonList(detailUrls);
+  const normalized = details.map(function (obj) {
+    return obj ? normalizeMet(obj) : null;
+  });
+
+  return normalized.filter(Boolean).filter(function (item) {
+    return matchesImagePreference(item, hasImage);
+  });
+}
+
+async function fetchHarvardJson(url) {
+  return fetchJson(url, { retries: 1, retryDelay: 250 });
 }
 
 async function fetchHarvardCandidates(query, hasImage, maxCount) {
@@ -113,13 +269,12 @@ async function fetchHarvardCandidates(query, hasImage, maxCount) {
     "&page=1&apikey=" +
     encodeURIComponent(HARVARD_API_KEY);
 
-  const data = await fetchJson(url);
+  const data = await fetchHarvardJson(url);
   const records = Array.isArray(data.records) ? data.records : [];
   const normalized = records.map(normalizeHarvard);
 
   return normalized.filter(function (item) {
-    if (!hasImage) return true;
-    return Boolean(item.image);
+    return matchesImagePreference(item, hasImage);
   });
 }
 
@@ -158,6 +313,7 @@ app.get("/api/search", async function (req, res) {
     const maxCandidatesPerSource = 40; // reduce API pressure
     let results = [];
     let attempted = 0;
+    let failed = 0;
     const warnings = [];
 
     if (source === "met" || source === "both") {
@@ -166,30 +322,48 @@ app.get("/api/search", async function (req, res) {
         const metResults = await fetchMetCandidates(q, hasImage, maxCandidatesPerSource);
         results = results.concat(metResults);
       } catch (err) {
+        failed += 1;
         warnings.push("MET failed: " + (err.message || "unknown error"));
       }
     }
 
-    if (source === "harvard" || source === "both") {
+    if (source === "both" && !HARVARD_API_KEY) {
+      warnings.push("HARVARD skipped: HARVARD_API_KEY is missing on server");
+    } else if (source === "harvard" || source === "both") {
       attempted += 1;
       try {
         const harvardResults = await fetchHarvardCandidates(q, hasImage, maxCandidatesPerSource);
         results = results.concat(harvardResults);
       } catch (err) {
+        failed += 1;
         warnings.push("HARVARD failed: " + (err.message || "unknown error"));
       }
     }
 
     // If all attempted sources failed, return an error.
-    if (warnings.length === attempted) {
+    if (attempted > 0 && failed === attempted) {
       return res.status(502).json({
         error: "All sources failed",
         details: warnings
       });
     }
 
+    results = results.filter(function (item) {
+      return matchesImagePreference(item, hasImage);
+    });
+
     results.sort(function (a, b) {
-      return a.title.localeCompare(b.title);
+      const aScore = searchRelevanceScore(a, q);
+      const bScore = searchRelevanceScore(b, q);
+      if (aScore !== bScore) return aScore - bScore;
+
+      const aTitle = (a.title || "").toLowerCase();
+      const bTitle = (b.title || "").toLowerCase();
+      const aArtist = (a.artist || "").toLowerCase();
+      const bArtist = (b.artist || "").toLowerCase();
+
+      if (aArtist !== bArtist) return aArtist.localeCompare(bArtist);
+      return aTitle.localeCompare(bTitle);
     });
 
     const paged = paginate(results, page, pageSize);
@@ -252,6 +426,10 @@ app.get("/api/artist/:name", async function (req, res) {
     return res.json({
       title: safeString(data.title) || name,
       extract: safeString(data.extract) || "No biography available.",
+      image:
+        data && data.thumbnail && data.thumbnail.source
+          ? safeString(data.thumbnail.source)
+          : "",
       url:
         data &&
         data.content_urls &&
@@ -264,6 +442,7 @@ app.get("/api/artist/:name", async function (req, res) {
     return res.json({
       title: safeString(req.params.name),
       extract: "No biography available.",
+      image: "",
       url: ""
     });
   }
@@ -280,27 +459,22 @@ app.get("/api/artist/:name/works", async function (req, res) {
     }
 
     let works = [];
+    const terms = artistSearchTerms(name);
+    const searchName = terms.fullName || name;
 
     if (source === "met" || source === "both") {
-      const metPool = await fetchMetCandidates(name, true, 80);
+      const metPool = await fetchMetCandidates(searchName, true, 80);
       const filtered = metPool.filter(function (item) {
-        return item.artist.toLowerCase().includes(name.toLowerCase());
+        return artistMatches(item, terms);
       });
       works = works.concat(filtered);
     }
 
     if (source === "harvard" || source === "both") {
       if (HARVARD_API_KEY) {
-        const url =
-          "https://api.harvardartmuseums.org/object?person=" +
-          encodeURIComponent(name) +
-          "&size=40&page=1&apikey=" +
-          encodeURIComponent(HARVARD_API_KEY);
-
-        const data = await fetchJson(url);
-        const records = Array.isArray(data.records) ? data.records : [];
-        works = works.concat(records.map(normalizeHarvard).filter(function (item) {
-          return Boolean(item.image);
+        const harvardPool = await fetchHarvardCandidates(searchName, true, 80);
+        works = works.concat(harvardPool.filter(function (item) {
+          return artistMatches(item, terms);
         }));
       }
     }

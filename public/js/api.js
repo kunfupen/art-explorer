@@ -1,11 +1,14 @@
-async function apiGet(url) {
-  const response = await fetch(url);
+async function apiGet(url, options) {
+  const response = await fetch(url, options || {});
   const data = await response.json().catch(function () {
     return {};
   });
 
   if (!response.ok) {
-    throw new Error(data.error || "Request failed");
+    const details = Array.isArray(data.details) && data.details.length
+      ? ": " + data.details.join("; ")
+      : "";
+    throw new Error((data.error || "Request failed") + details);
   }
   return data;
 }
@@ -21,7 +24,7 @@ function buildSearchQuery(params) {
 
 async function searchArtworks(params) {
   const query = buildSearchQuery(params);
-  return apiGet("/api/search?" + query);
+  return apiGet("/api/search?" + query, { signal: params.signal });
 }
 
 async function getArtworkDetails(source, id) {

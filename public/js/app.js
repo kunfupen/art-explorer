@@ -10,7 +10,9 @@ const state = {
   selectedArtwork: null,
   bioLoadedFor: "",
   worksLoadedFor: "",
-  debounceTimer: null
+  debounceTimer: null,
+  searchRequestId: 0,
+  searchAbortController: null
 };
 
 const el = {
@@ -25,6 +27,7 @@ const el = {
   queryInput: document.getElementById("queryInput"),
   sourceSelect: document.getElementById("sourceSelect"),
   hasImageCheck: document.getElementById("hasImageCheck"),
+  imageFilterLabel: document.getElementById("imageFilterLabel"),
   searchBtn: document.getElementById("searchBtn"),
 
   resultCountText: document.getElementById("resultCountText"),
@@ -42,9 +45,11 @@ const el = {
   overviewContent: document.getElementById("overviewContent"),
   bioContent: document.getElementById("bioContent"),
   worksContent: document.getElementById("worksContent"),
+  mapInfo: document.getElementById("mapInfo"),
 
   favoritesGrid: document.getElementById("favoritesGrid"),
   favoritesEmpty: document.getElementById("favoritesEmpty"),
+  favoritesCountBadge: document.getElementById("favoritesCountBadge"),
   searchError: document.getElementById("searchError")
 };
 
@@ -88,6 +93,18 @@ function toCardHtml(item) {
   );
 }
 
+function toRelatedWorkHtml(item) {
+  const image = item.image
+    ? '<img class="related-work-image" src="' + escapeHtml(item.image) + '" alt="">'
+    : '<div class="related-work-image related-work-placeholder d-flex align-items-center justify-content-center text-muted">No Image</div>';
+
+  return (
+    '<div class="related-work-item" role="button" tabindex="0" title="' + escapeHtml(item.title || "Related artwork") + '" aria-label="' + escapeHtml(item.title || "Related artwork") + '" data-source="' + escapeHtml(item.source) + '" data-id="' + escapeHtml(item.id) + '">' +
+      image +
+    "</div>"
+  );
+}
+
 function showView(name) {
   state.view = name;
   el.searchView.classList.toggle("d-none", name !== "search");
@@ -121,14 +138,25 @@ function renderPagination() {
   el.nextBtn.disabled = state.page >= state.totalPages;
 }
 
+function syncImageFilterLabel() {
+  el.imageFilterLabel.textContent = el.hasImageCheck.checked ? "Has Image" : "No Image";
+}
+
 function renderResults() {
-  el.resultCountText.textContent = state.total + " results found";
   if (!state.results.length) {
-    el.resultsGrid.innerHTML = '<div class="col"><div class="alert alert-secondary">No results found.</div></div>';
+    el.resultCountText.textContent = "";
+    el.resultsGrid.innerHTML =
+      '<div class="empty-results-col">' +
+        '<div class="empty-results">' +
+          '<div class="empty-results-icon">🎨</div>' +
+          '<div class="empty-results-text">No artworks found. Try a different search term.</div>' +
+        "</div>" +
+      "</div>";
     renderPagination();
     return;
   }
 
+  el.resultCountText.textContent = state.total + " results found";
   el.resultsGrid.innerHTML = state.results.map(toCardHtml).join("");
   renderPagination();
 
@@ -172,6 +200,12 @@ function renderFavoriteButton() {
   el.favoriteBtn.textContent = favored ? "♥ Remove from Favorites" : "♡ Add to Favorites";
 }
 
+function renderFavoritesCount() {
+  const count = readFavorites().length;
+  el.favoritesCountBadge.textContent = String(count);
+  el.favoritesCountBadge.classList.toggle("d-none", count === 0);
+}
+
 async function renderBiographyIfNeeded() {
   if (!state.selectedArtwork) return;
   const artist = (state.selectedArtwork.artist || "").trim();
@@ -186,13 +220,23 @@ async function renderBiographyIfNeeded() {
   el.bioContent.innerHTML = "Loading biography...";
   try {
     const bio = await getArtistBio(artist);
-    const link = bio.url
-      ? '<a href="' + escapeHtml(bio.url) + '" target="_blank">Read full article on Wikipedia</a>'
+    const image = bio.image
+      ? '<img class="bio-image" src="' + escapeHtml(bio.image) + '" alt="' + escapeHtml(bio.title || artist) + '">'
+      : '<div class="bio-image bio-image-placeholder d-flex align-items-center justify-content-center text-muted">No Image</div>';
+    const linkButton = bio.url
+      ? '<a href="' + escapeHtml(bio.url) + '" target="_blank" class="btn btn-outline-secondary btn-lg">View on Wikipedia</a>'
       : "";
     el.bioContent.innerHTML =
-      '<h4 class="fw-bold mb-3">' + escapeHtml(bio.title || artist) + "</h4>" +
-      '<p class="fs-5">' + escapeHtml(bio.extract || "No biography available.") + "</p>" +
-      link;
+      '<div class="bio-panel">' +
+        '<div class="bio-header">' +
+          image +
+          '<div class="bio-heading">' +
+            '<h3>' + escapeHtml(bio.title || artist) + "</h3>" +
+            linkButton +
+          "</div>" +
+        "</div>" +
+        '<p class="bio-extract">' + escapeHtml(bio.extract || "No biography available.") + "</p>" +
+      "</div>";
     state.bioLoadedFor = key;
   } catch (err) {
     el.bioContent.innerHTML = '<div class="alert alert-warning">Failed to load biography.</div>';
@@ -212,7 +256,7 @@ async function renderRelatedWorksIfNeeded() {
 
   el.worksContent.innerHTML = "Loading related works...";
   try {
-    const data = await getArtistWorks(artist, state.selectedArtwork.source);
+    const data = await getArtistWorks(artist, "both");
     const works = (Array.isArray(data.results) ? data.results : [])
       .filter(function (item) {
         return item.id !== state.selectedArtwork.id || item.source !== state.selectedArtwork.source;
@@ -222,13 +266,21 @@ async function renderRelatedWorksIfNeeded() {
     if (!works.length) {
       el.worksContent.innerHTML = '<div class="alert alert-secondary">No related works found.</div>';
     } else {
-      el.worksContent.innerHTML = '<div class="row row-cols-1 row-cols-md-2 g-3">' + works.map(toCardHtml).join("") + "</div>";
-      const cards = el.worksContent.querySelectorAll(".art-card");
-      cards.forEach(function (card) {
-        card.addEventListener("click", function () {
-          const source = card.getAttribute("data-source");
-          const id = card.getAttribute("data-id");
+      el.worksContent.innerHTML = '<div class="related-works-grid">' + works.map(toRelatedWorkHtml).join("") + "</div>";
+      const items = el.worksContent.querySelectorAll(".related-work-item");
+      items.forEach(function (item) {
+        item.addEventListener("click", function () {
+          const source = item.getAttribute("data-source");
+          const id = item.getAttribute("data-id");
           openArtworkDetail(source, id);
+        });
+        item.addEventListener("keydown", function (event) {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            const source = item.getAttribute("data-source");
+            const id = item.getAttribute("data-id");
+            openArtworkDetail(source, id);
+          }
         });
       });
     }
@@ -241,7 +293,12 @@ async function renderRelatedWorksIfNeeded() {
 
 function renderMapIfNeeded() {
   if (!state.selectedArtwork) return;
-  renderMuseumMap("mapContainer", state.selectedArtwork.lat, state.selectedArtwork.lng, state.selectedArtwork.museum);
+  const museum = state.selectedArtwork.museum || "Museum";
+  const address = state.selectedArtwork.museumAddress || "";
+  el.mapInfo.innerHTML =
+    '<h3>' + escapeHtml(museum) + "</h3>" +
+    (address ? '<p>' + escapeHtml(address) + "</p>" : "");
+  renderMuseumMap("mapContainer", state.selectedArtwork.lat, state.selectedArtwork.lng, museum, address);
 }
 
 async function openArtworkDetail(source, id) {
@@ -261,6 +318,7 @@ async function openArtworkDetail(source, id) {
 
     el.bioContent.textContent = "Loading biography...";
     el.worksContent.textContent = "Loading related works...";
+    el.mapInfo.innerHTML = "";
     clearMuseumMap();
 
     showView("detail");
@@ -298,6 +356,12 @@ async function runSearch(page, showEmptyError) {
   state.source = el.sourceSelect.value;
   state.hasImage = el.hasImageCheck.checked;
   state.page = page || 1;
+  state.searchRequestId += 1;
+  const requestId = state.searchRequestId;
+  if (state.searchAbortController) {
+    state.searchAbortController.abort();
+  }
+  state.searchAbortController = new AbortController();
 
   setLoading(true);
 
@@ -306,8 +370,11 @@ async function runSearch(page, showEmptyError) {
       q: state.query,
       page: state.page,
       source: state.source,
-      hasImage: state.hasImage
+      hasImage: state.hasImage,
+      signal: state.searchAbortController.signal
     });
+
+    if (requestId !== state.searchRequestId) return;
 
     state.results = Array.isArray(data.results) ? data.results : [];
     state.total = Number(data.total || 0);
@@ -317,6 +384,9 @@ async function runSearch(page, showEmptyError) {
     setLoading(false);
     renderResults();
   } catch (err) {
+    if (requestId !== state.searchRequestId) return;
+    if (err && err.name === "AbortError") return;
+
     setLoading(false);
     el.resultCountText.textContent = "";
     const message = err && err.message ? err.message : "Search failed. Check server and API key.";
@@ -328,6 +398,7 @@ async function runSearch(page, showEmptyError) {
 
 function renderFavorites() {
   const list = readFavorites();
+  renderFavoritesCount();
   el.favoritesEmpty.classList.toggle("d-none", list.length > 0);
 
   if (!list.length) {
@@ -337,19 +408,18 @@ function renderFavorites() {
 
   el.favoritesGrid.innerHTML = list.map(function (item) {
     return (
-      '<div class="col">' +
-        '<div class="card art-card h-100" data-source="' + escapeHtml(item.source) + '" data-id="' + escapeHtml(item.id) + '">' +
-          '<div class="position-relative">' +
-            (item.image
-              ? '<img class="art-image" src="' + escapeHtml(item.image) + '" alt="' + escapeHtml(item.title) + '">'
-              : '<div class="art-image d-flex align-items-center justify-content-center text-muted fs-4">No Image</div>') +
-            '<span class="source-badge ' + sourceBadgeClass(item.source) + '">' + sourceLabel(item.source) + "</span>" +
-          "</div>" +
-          '<div class="card-body">' +
-            '<h5 class="card-title fw-bold">' + escapeHtml(item.title) + "</h5>" +
-            '<p class="card-text text-muted mb-2 fs-4">' + escapeHtml(item.artist || "Unknown Artist") + "</p>" +
-            '<button class="btn btn-danger w-100 remove-fav-btn" data-source="' + escapeHtml(item.source) + '" data-id="' + escapeHtml(item.id) + '">Remove from Favorites</button>' +
-          "</div>" +
+      '<div class="favorite-card" data-source="' + escapeHtml(item.source) + '" data-id="' + escapeHtml(item.id) + '">' +
+        '<div class="favorite-image-wrap">' +
+          (item.image
+            ? '<img class="favorite-image" src="' + escapeHtml(item.image) + '" alt="' + escapeHtml(item.title) + '">'
+            : '<div class="favorite-image d-flex align-items-center justify-content-center text-muted fs-4">No Image</div>') +
+          '<span class="source-badge ' + sourceBadgeClass(item.source) + '">' + sourceLabel(item.source) + "</span>" +
+          '<button class="remove-fav-btn favorite-remove-btn" type="button" aria-label="Remove from favorites" data-source="' + escapeHtml(item.source) + '" data-id="' + escapeHtml(item.id) + '">×</button>' +
+        "</div>" +
+        '<div class="favorite-body">' +
+          '<h3>' + escapeHtml(item.title) + "</h3>" +
+          '<p class="favorite-artist">' + escapeHtml(item.artist || "Unknown Artist") + "</p>" +
+          '<p class="favorite-date">' + escapeHtml(item.date || "Unknown Date") + "</p>" +
         "</div>" +
       "</div>"
     );
@@ -367,7 +437,7 @@ function renderFavorites() {
     });
   });
 
-  const cards = el.favoritesGrid.querySelectorAll(".art-card");
+  const cards = el.favoritesGrid.querySelectorAll(".favorite-card");
   cards.forEach(function (card) {
     card.addEventListener("click", function () {
       const source = card.getAttribute("data-source");
@@ -408,6 +478,7 @@ function bindEvents() {
   });
 
   el.hasImageCheck.addEventListener("change", function () {
+    syncImageFilterLabel();
     if (el.queryInput.value.trim()) runSearch(1, false);
   });
 
@@ -428,6 +499,7 @@ function bindEvents() {
     if (!state.selectedArtwork) return;
     const added = toggleFavorite(state.selectedArtwork);
     renderFavoriteButton();
+    renderFavoritesCount();
     renderFavorites();
     if (!added && state.view === "favorites") renderFavorites();
   });
@@ -475,7 +547,9 @@ function bindEvents() {
 }
 
 function init() {
+  syncImageFilterLabel();
   bindEvents();
+  renderFavoritesCount();
   renderFavorites();
   showView("search");
   el.pageInfo.textContent = "Page 1 of 1";

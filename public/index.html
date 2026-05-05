@@ -22,7 +22,7 @@
             <a class="nav-link active" href="#" id="navSearch">Search</a>
           </li>
           <li class="nav-item">
-            <a class="nav-link" href="#" id="navFavorites">Favorites</a>
+            <a class="nav-link" href="#" id="navFavorites">Favorites <span id="favoritesCountBadge" class="favorites-count-badge d-none">0</span></a>
           </li>
         </ul>
       </div>
@@ -47,7 +47,7 @@
             <div class="col-6 col-md-3 col-lg-2">
               <div class="form-check mt-2">
                 <input class="form-check-input" type="checkbox" id="hasImageCheck" checked />
-                <label class="form-check-label fs-5" for="hasImageCheck">Has Image</label>
+                <label class="form-check-label fs-5" for="hasImageCheck" id="imageFilterLabel">Has Image</label>
               </div>
             </div>
             <div class="col-12 col-lg-3 d-grid">
@@ -114,6 +114,7 @@
               <div id="worksContent">Loading related works...</div>
             </div>
             <div class="tab-pane fade" id="tabMap">
+              <div id="mapInfo" class="map-info"></div>
               <div id="mapContainer"></div>
             </div>
           </div>
@@ -122,11 +123,14 @@
     </section>
 
     <section id="favoritesView" class="view-section d-none">
-      <div class="d-flex justify-content-between align-items-center mb-3">
-        <h2 class="display-5 fw-bold">Favorites</h2>
+      <div class="favorites-header">
+        <h2>My Favorites</h2>
       </div>
-      <div id="favoritesEmpty" class="alert alert-secondary d-none">No favorites saved yet.</div>
-      <div id="favoritesGrid" class="row row-cols-1 row-cols-md-2 row-cols-xl-4 g-4"></div>
+      <div id="favoritesEmpty" class="favorites-empty d-none">
+        <div class="favorites-empty-icon">🎨</div>
+        <div class="favorites-empty-text">You haven't saved any favorites yet. Start exploring and add some artworks!</div>
+      </div>
+      <div id="favoritesGrid" class="favorites-grid"></div>
     </section>
   </main>
 
