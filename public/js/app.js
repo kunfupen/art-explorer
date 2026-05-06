@@ -71,6 +71,35 @@ function sourceLabel(source) {
   return source === "harvard" ? "HARVARD" : "MET";
 }
 
+function artistLastName(artist) {
+  const cleaned = String(artist || "")
+    .replace(/\([^)]*\)/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!cleaned || cleaned.toLowerCase() === "unknown artist") return "";
+  const parts = cleaned.split(" ").filter(Boolean);
+  return parts.length ? parts[parts.length - 1].toLowerCase() : cleaned.toLowerCase();
+}
+
+function matchesQueryText(item, query) {
+  const q = String(query || "").trim().toLowerCase();
+  if (!q) return false;
+  const title = String(item && item.title ? item.title : "").toLowerCase();
+  const artist = String(item && item.artist ? item.artist : "").toLowerCase();
+  if (!title && !artist) return false;
+  const terms = q.split(/\s+/).filter(Boolean);
+  if (!terms.length) return false;
+
+  const lastName = artistLastName(item && item.artist ? item.artist : "");
+
+  return terms.some(function (term) {
+    if (term.length <= 4) {
+      return (artist && artist.includes(term)) || (lastName && lastName.startsWith(term));
+    }
+    return (title && title.includes(term)) || (artist && artist.includes(term));
+  });
+}
+
 function toCardHtml(item) {
   const image = item.image
     ? '<img class="art-image" src="' + escapeHtml(item.image) + '" alt="' + escapeHtml(item.title) + '">'
@@ -144,12 +173,12 @@ function syncImageFilterLabel() {
 
 function renderResults() {
   if (!state.results.length) {
-    el.resultCountText.textContent = "";
+    el.resultCountText.textContent = "No results found" + (state.query ? " for \"" + state.query + "\"" : "");
     el.resultsGrid.innerHTML =
       '<div class="empty-results-col">' +
         '<div class="empty-results">' +
           '<div class="empty-results-icon">🎨</div>' +
-          '<div class="empty-results-text">No artworks found. Try a different search term.</div>' +
+          '<div class="empty-results-text">No results found. Try a different search term.</div>' +
         "</div>" +
       "</div>";
     renderPagination();
@@ -376,10 +405,15 @@ async function runSearch(page, showEmptyError) {
 
     if (requestId !== state.searchRequestId) return;
 
-    state.results = Array.isArray(data.results) ? data.results : [];
-    state.total = Number(data.total || 0);
-    state.totalPages = Number(data.totalPages || 1);
-    state.page = Number(data.page || 1);
+    const incoming = Array.isArray(data.results) ? data.results : [];
+    state.results = incoming.filter(function (item) {
+      return matchesQueryText(item, state.query);
+    });
+
+    const pageSize = Number(data.pageSize || 20);
+    state.total = state.results.length;
+    state.totalPages = Math.max(1, Math.ceil(state.total / pageSize));
+    state.page = Math.min(Number(data.page || 1), state.totalPages);
 
     setLoading(false);
     renderResults();

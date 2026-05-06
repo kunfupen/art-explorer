@@ -147,6 +147,41 @@ function searchRelevanceScore(item, query) {
   return 8;
 }
 
+function matchesQueryText(item, query) {
+  const q = safeString(query).toLowerCase().trim();
+  if (!q) return false;
+
+  const title = safeString(item.title).toLowerCase();
+  const artist = safeString(item.artist).toLowerCase();
+  if (!title && !artist) return false;
+
+  const queryTerms = q.split(/\s+/).filter(Boolean);
+  if (!queryTerms.length) return false;
+
+  const artistLastName =
+    artist && artist !== "unknown artist" ? artistSearchTerms(item.artist).lastName : "";
+
+  return queryTerms.some(function (term) {
+    if (term.length <= 4) {
+      return (artist && artist.includes(term)) || (artistLastName && artistLastName.startsWith(term));
+    }
+    return (title && title.includes(term)) || (artist && artist.includes(term));
+  });
+}
+
+function matchesQueryStrict(item, query) {
+  const q = safeString(query).toLowerCase().trim();
+  if (!q) return false;
+  const title = safeString(item.title).toLowerCase();
+  const artist = safeString(item.artist).toLowerCase();
+  if (!title && !artist) return false;
+  const queryTerms = q.split(/\s+/).filter(Boolean);
+  if (!queryTerms.length) return false;
+  return queryTerms.some(function (term) {
+    return (title && title.includes(term)) || (artist && artist.includes(term));
+  });
+}
+
 function sleep(ms) {
   return new Promise(function (resolve) {
     setTimeout(resolve, ms);
@@ -255,6 +290,29 @@ async function fetchHarvardJson(url) {
   return fetchJson(url, { retries: 1, retryDelay: 250 });
 }
 
+async function fetchWikidataSuggestion(query) {
+  const url =
+    "https://www.wikidata.org/w/api.php?action=wbsearchentities&language=en&format=json&limit=5&search=" +
+    encodeURIComponent(query);
+  const data = await fetchJson(url, { retries: 1, retryDelay: 200, cacheMs: 5 * 60 * 1000 });
+  const results = data && Array.isArray(data.search) ? data.search : [];
+  if (!results.length) return "";
+
+  const lowerQuery = safeString(query).toLowerCase();
+  const personLike = results.find(function (item) {
+    const label = safeString(item && item.label).toLowerCase();
+    const desc = safeString(item && item.description).toLowerCase();
+    const parts = label.split(/\s+/).filter(Boolean);
+    const lastName = parts.length ? parts[parts.length - 1] : "";
+    if (parts.length < 2) return false;
+    if (!lastName.startsWith(lowerQuery)) return false;
+    return desc.includes("artist") || desc.includes("painter") || desc.includes("sculptor");
+  });
+
+  if (personLike && personLike.label) return safeString(personLike.label);
+  return "";
+}
+
 async function fetchHarvardCandidates(query, hasImage, maxCount) {
   if (!HARVARD_API_KEY) {
     throw new Error("HARVARD_API_KEY is missing on server");
@@ -351,6 +409,56 @@ app.get("/api/search", async function (req, res) {
     results = results.filter(function (item) {
       return matchesImagePreference(item, hasImage);
     });
+
+    let filteredResults = results.filter(function (item) {
+      return matchesQueryText(item, q);
+    });
+
+    const strictResults = results.filter(function (item) {
+      return matchesQueryStrict(item, q);
+    });
+    if ((q.length > 4 || /\d/.test(q)) && strictResults.length === 0) {
+      filteredResults = [];
+    }
+
+    if (q.length <= 4) {
+      try {
+        const suggestion = await fetchWikidataSuggestion(q);
+        const suggestedQuery =
+          suggestion && suggestion.toLowerCase() !== q.toLowerCase() ? suggestion : "";
+        if (suggestedQuery) {
+          const suggestedLastName = artistSearchTerms(suggestedQuery).lastName;
+          if (!suggestedLastName || !suggestedLastName.startsWith(q.toLowerCase())) {
+            results = filteredResults;
+          } else {
+          let suggestedResults = [];
+          if (source === "met" || source === "both") {
+            suggestedResults = suggestedResults.concat(
+              await fetchMetCandidates(suggestedQuery, hasImage, maxCandidatesPerSource)
+            );
+          }
+          if (source === "harvard" || source === "both") {
+            suggestedResults = suggestedResults.concat(
+              await fetchHarvardCandidates(suggestedQuery, hasImage, maxCandidatesPerSource)
+            );
+          }
+
+          suggestedResults = suggestedResults.filter(function (item) {
+            return matchesImagePreference(item, hasImage) && matchesQueryText(item, suggestedQuery);
+          });
+
+            if (suggestedResults.length > 0) {
+              filteredResults = suggestedResults;
+              warnings.push("Used suggestion: " + suggestedQuery);
+            }
+          }
+        }
+      } catch (err) {
+        warnings.push("Suggestion lookup failed: " + (err.message || "unknown error"));
+      }
+    }
+
+    results = filteredResults;
 
     results.sort(function (a, b) {
       const aScore = searchRelevanceScore(a, q);
