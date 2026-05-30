@@ -32,8 +32,6 @@ Live app: https://art-explorer-721957825009.us-central1.run.app/
 │       ├── app.js
 │       ├── favorites.js
 │       └── map.js
-├── docs/
-│   └── process_log.txt
 └── README.md
 ```
 
@@ -81,7 +79,3 @@ http://localhost:8080
 docker build -t art-explorer .
 docker run --env-file .env -p 8080:8080 art-explorer
 ```
-
-## Development Notes
-
-The AI-assisted development log is available in [docs/process_log.txt](docs/process_log.txt).
